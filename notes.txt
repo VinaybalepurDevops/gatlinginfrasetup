@@ -1,0 +1,2 @@
+Parallel run in jenkins - https://stackoverflow.com/questions/48930433/running-same-jenkins-job-on-multiple-agents-in-parallel-in-declarative-pipeline
+epoch time in linux - date +%s%N | cut -b1-13
