@@ -1,0 +1,217 @@
+
+def agents  = getAgents()
+
+//Get the selected nodes
+def getAgents(){
+    try
+    {
+        if( nodes.isEmpty())
+        {
+            nodes = "1,2"
+        }
+    }catch(Throwable t)
+    {
+        nodes = "1,2"
+    }
+    def nodes = nodes.split(",") as List
+    return nodes
+}
+
+def createResultsFolderInMaster(nodeLabel){
+	return {
+        stage("Deleting results in master") {
+			node {nodeLabel} {
+					script {
+						sh "resFolder=/home/ubuntu/results"
+						sh "if [  -d "$resFolder" ]; then rm -rf "$resFolder" && mkdir -p "$resFolder"; else mkdir -p "$resFolder"; fi"
+						echo "Done with result folder creation in master"
+					}
+				}
+		}
+	}
+}
+
+
+def createResutlsFolderInNode(nodeLabel) {
+    return {
+        stage("Deleting results in ${nodeLabel}") {
+            node(nodeLabel) {
+               script {
+                    sh "date +\"%s\""
+                    echo "Running on ${nodeLabel}"
+					//sh "resultsDirInNode=/home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results"
+					sh "if [  -d '/home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results' ]; then rm -rf '/home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results' && mkdir -p '/home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results'; else mkdir -p '/home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results'; fi"
+					echo "Done with result folder creation in nodes"
+                    
+                }
+            }
+        }
+    }
+}
+
+def runThePerfTest(nodeLabel) {
+	return {
+        stage("Running perf test in ${nodeLabel}") {
+            node(nodeLabel) {
+               script {
+                    sh "date +\"%s\""
+					sh "sed -i 's/ui.inject.*/ui.inject(constantConcurrentUsers(${virtualusers}) during(${duration} seconds)).protocols(httpProtocol)/g' /home/ubuntu/workspace/Test/build/ProdTest.scala"
+					sh "cp /home/ubuntu/workspace/Test/build/ProdTest.scala /home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/user-files/simulations/ProdTest.scala"
+					sh "sh /home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/bin/gatling.sh -bm -s com.gatling.tests.ProdTest --run-mode local"
+					sh "mv /home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results/* /home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results/resultfolder"
+					sh "mv /home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results/resultfolder/simulation.log /home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results/resultfolder/${nodeLabel}simulation.log"
+					sh "sudo apt install zip -y"
+					sh "zip -r /home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results/resultfolder/log${nodeLabel}.zip  /home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results/resultfolder/${nodeLabel}simulation.log"
+					echo "Completed gatling execution"
+                }
+            }
+        }
+    }
+}
+
+def cloneCodeToNodes(nodeLabel) {
+	return {
+        stage("Clonig to ${nodeLabel}") {
+            node(nodeLabel) {
+               script {
+                   echo 'Make the output directory'
+                   sh 'mkdir -p build'
+                    dir('build') {
+                        git(
+                        url: "https://github.com/VinaybalepurDevops/gatling.git",
+                        branch: "master"
+                        )
+                    }
+                }
+            }
+        }
+	}
+}
+
+def cloneCode = agents.collectEntries {
+    ["${it}" : cloneCodeToNodes(it)]
+}
+
+
+
+def createResutlsFolderInMaster = agents.collectEntries {
+    ["${it}" : createResultsFolderInMaster(it)]
+}
+
+def createResutlsFolderInTheNode = agents.collectEntries {
+    ["${it}" : createResutlsFolderInNode(it)]
+}
+
+def runThePerfTest = agents.collectEntries {
+    ["${it}" : runThePerfTest(it)]
+}
+
+properties([
+    parameters([
+        [$class: 'CascadeChoiceParameter',
+            choiceType: 'PT_CHECKBOX',
+            filterLength: 1,
+            filterable: false,
+            name: 'nodes',
+            script: [
+                $class: 'GroovyScript',
+                script: [
+                    classpath: [],
+                    sandbox: false,
+                    script:
+'''def words = []
+new File( '/home/ubuntu/gatlinginfra/nodes.txt' ).eachLine { line ->
+words << line
+}
+return words
+'''
+                ]
+            ]
+        ]
+    ])
+])
+
+pipeline {
+    
+    agent none
+    parameters{
+		string(name: 'virtualusers', defaultValue: '0')
+		string(name: 'duration', defaultValue: '0')
+	}
+    stages {
+
+		stage('Creation of result folder in master') {
+			agent {label 'master'}
+            steps {
+                sh "resFolder=/home/ubuntu/results"
+				sh "if [  -d '/home/ubuntu/results' ]; then rm -rf '/home/ubuntu/results' && mkdir -p '/home/ubuntu/results'; else mkdir -p '/home/ubuntu/results'; fi"
+				
+				echo "Done with result folder creation in master"
+            }
+        }
+
+		stage('Clone the code') {
+            steps {
+                script {
+                    parallel cloneCode
+                }
+            }
+        } 
+
+
+        stage('Create results') {
+            steps {
+                script {
+                    parallel createResutlsFolderInTheNode
+                }
+            }
+        }   
+
+		stage('Run the perf test') {
+            steps {
+                script {
+                    parallel runThePerfTest
+                }
+            }
+        }
+
+		stage('Copy results to master') {
+			agent {label 'master'}
+            steps {
+				sh "cd /home/ubuntu/gatlinginfra/; ./copyresults.sh"
+            }
+        } 
+
+		stage('Unzip results and create simulation log file') {
+			agent {label 'master'}
+            steps {
+				sh "cd /home/ubuntu/results/ ; unzip '*.zip' ; mv home/ubuntu/gatling/gatling-charts-highcharts-bundle-3.9.5/results/resultfolder/* . ; rm -rf home; rm -rf *.zip"
+				sh "cd /home/ubuntu/results/ ; cat * > simulation.log ; rm node*.log"
+			}
+        } 
+
+		stage('Create results file') {
+			agent {label 'master'}
+            steps {
+				sh "cd /home/ubuntu/gatling-charts-highcharts-bundle-3.9.5/bin ; sh gatling.sh -ro /home/ubuntu/results"
+			}
+        } 
+    }
+
+	post {
+		always {  
+			node ("master"){
+				publishHTML (target: [
+					reportName: 'Perf_reports',
+					reportDir: '/home/ubuntu/results/',
+					reportFiles: 'index.html', 
+					keepAll: true,
+					alwaysLinkToLastBuild: true,
+					allowMissing: false
+				])
+			}  
+		}
+		
+    }
+	
+}
